@@ -26,11 +26,13 @@ var inChan chan string
 var outChan chan Result
 
 // A channel we'll use to signal when we're out of input so our goroutines can stop
-var doneChan chan bool
+var runDoneChan chan bool
+var outDoneChan chan bool
 
 // We'll use this waitgroup to track the total number of routines we have started
 // so that everything can stop gracefully
-var doneWait sync.WaitGroup
+var runDoneWait sync.WaitGroup
+var outDoneWait sync.WaitGroup
 
 func main() {
 	// Some variables to hold our authentication types.
@@ -46,7 +48,7 @@ func main() {
 	optPass := flag.String("pass", "", "Password to use for auth.")
 	// Using the word threads here so it makes sense to end users, but we're really using goroutines
 	optThreads := flag.Int("threads", 10, "Number of concurrent connections to attempt.")
-	optCmd := flag.String("cmd", "", "Command to run on remote systems.")
+	optCmd := flag.String("cmd", "", "Command to run on remote systems. Newlines will be replaced with <br>.")
 	flag.Parse()
 
 	// If we didn't get any targets, print an error.
@@ -105,7 +107,8 @@ func main() {
 	// the number of goroutines we're going to use
 	inChan = make(chan string, *optThreads)
 	outChan = make(chan Result)
-	doneChan = make(chan bool)
+	runDoneChan = make(chan bool, *optThreads)
+	outDoneChan = make(chan bool, 1)
 
 	// Startup a goroutine that will handle our output (stdout and file)
 	go runOutput(outFile)
@@ -113,7 +116,7 @@ func main() {
 	// Startup goroutines for the number the user gave us.  Each will connect to hosts
 	// and try and run a command if one was provided.
 	for i := 0; i < *optThreads; i++ {
-		go runConnect(authType, authInfo, authUser, *optCmd)
+		go runConnect(authType, authInfo, authUser, *optCmd, i)
 	}
 
 	// This function loops through all of our input and adds it to the proper
@@ -125,19 +128,21 @@ func main() {
 	}
 
 	// Finally, let's signal all of our goroutines (+1 is for output routine) and
-	// tell them we're done.
-	signalDone(*optThreads + 1)
+	// tell them we're done, then wait for them all to shutdown
+	signalDone(*optThreads)
+	runDoneWait.Wait()
 
-	// Finally, let's wait until they all shut down.
-	doneWait.Wait()
+	// Now let's signal the output thread we're done and to shutdown when it's done
+	outDoneChan <- true
+	outDoneWait.Wait()
 }
 
-// This function signals that we're done by sending data down the doneChannel that
+// This function signals that we're done by sending data down the runDoneChannel that
 // we're using as a signal.  It will send that as many times as we have routines
 // because we need to make sure each routine gets it at least once.
 func signalDone(routines int) {
 	for i := 0; i < routines; i++ {
-		doneChan <- true
+		runDoneChan <- true
 	}
 }
 
@@ -172,7 +177,7 @@ func runInput(file string) error {
 func runOutput(outFile *os.File) {
 	// We're going to increase the waitgroup number so the main routine knows when
 	// everything is done.
-	doneWait.Add(1)
+	outDoneWait.Add(1)
 
 	// Write the header row to our CSV
 	outFile.WriteString("'Host','Success','Message','Output'\n")
@@ -191,7 +196,6 @@ func runOutput(outFile *os.File) {
 			} else {
 				fmt.Printf("\033[31m%-20s\033[0m\t", result.Host)
 			}
-
 			// Increase the line counter, if it's greater than 3 then we'll just
 			// print a newline and reset the counter.  This is so we have limited
 			// numbers on each line and try to line up the columns.
@@ -204,10 +208,10 @@ func runOutput(outFile *os.File) {
 			// Finally, let's write the string to our output file.
 			outFile.WriteString(fmt.Sprintf("'%s','%t','%s','%s'\n", result.Host, result.Status, result.Message, result.Output))
 
-		// We'll use doneChan to signal that the program is complete (probably out of input).
+		// We'll use runDoneChan to signal that the program is complete (probably out of input).
 		// Once we're done printing all of our output, let's signal that we're done.
-		case <-doneChan:
-			doneWait.Done()
+		case <-outDoneChan:
+			outDoneWait.Done()
 			return
 		}
 	}
@@ -220,12 +224,12 @@ func runOutput(outFile *os.File) {
 // if one is provided and gather the output.  There are no returns, but when
 // complete passes a Result struct down the outChan channel.
 //
-// To end this loop, any data should be sent down the doneChan to signal program
+// To end this loop, any data should be sent down the runDoneChan to signal program
 // complete.
-func runConnect(authtype string, authdata []byte, user, cmd string) {
+func runConnect(authtype string, authdata []byte, user, cmd string, num int) {
 	// Let's increase the WaitGroup we have so main knows how many goroutines are
 	// running.
-	doneWait.Add(1)
+	runDoneWait.Add(1)
 
 	for {
 		select {
@@ -280,9 +284,10 @@ func runConnect(authtype string, authdata []byte, user, cmd string) {
 		// We'll use doneChan to signal that the program is complete (probably out of input).
 		// When we get data on this channel as a signal, we'll signal that this routine is done
 		// so main knows when they're all complete.  Finally, we'll return
-		case <-doneChan:
-			doneWait.Done()
+		case <-runDoneChan:
+			runDoneWait.Done()
 			return
+		default:
 		}
 	}
 }
@@ -295,8 +300,12 @@ func executeCommand(cmd string, session *ssh.Session) (string, error) {
 		return "", err
 	}
 
+	// Convert our output to a string
+	tmpOut := string(out)
+	tmpOut = strings.Replace(tmpOut, "\n", "<br>", -1)
+
 	// Return a string version of our result
-	return string(out), nil
+	return tmpOut, nil
 }
 
 // Connects to a target via SSH using a certificate
