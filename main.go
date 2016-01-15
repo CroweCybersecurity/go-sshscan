@@ -44,7 +44,7 @@ func main() {
 	optTargets := flag.String("targets", "", "File of targets to connect to (host:port).  Port is optional.")
 	optOut := flag.String("out", "", "File to write our detailed results to.")
 	optUser := flag.String("user", "", "Username to attempt.")
-	optKey := flag.String("key", "", "File to use for key based auth.")
+	optKey := flag.String("key", "", "PEM encoded key file to use for auth. (Note: Key or Pass may be used, not both)")
 	optPass := flag.String("pass", "", "Password to use for auth.")
 	// Using the word threads here so it makes sense to end users, but we're really using goroutines
 	optThreads := flag.Int("threads", 10, "Number of concurrent connections to attempt.")
